@@ -13,11 +13,6 @@ import (
 	"github.com/jaeyo/go-drain3/pkg/drain3"
 )
 
-type LogEntry struct {
-	Timestamp time.Time
-	Message   string
-}
-
 const (
 	logFile     = "exemplo.log"
 	timeLayout  = "Mon Jan 02 15:04:05 2006"
