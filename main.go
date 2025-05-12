@@ -18,17 +18,26 @@ type LogEntry struct {
 	Message   string
 }
 
+const (
+	logFile     = "exemplo.log"
+	timeLayout  = "Mon Jan 02 15:04:05 2006"
+	timePattern = `^\[(.*?)\]`
+)
+
 func main() {
-	drain, _ := drain3.NewDrain(drain3.WithExtraDelimiter([]string{"_"}))
+	// Inicializa Drain com delimitador extra
+	drain, err := drain3.NewDrain(drain3.WithExtraDelimiter([]string{"_"}))
+	if err != nil {
+		fmt.Println("Erro ao inicializar Drain:", err)
+		return
+	}
 
 	miner := drain3.NewTemplateMiner(drain, drain3.NewMemoryPersistence())
 
-	timeRegex := regexp.MustCompile(`^\[(.*?)\]`)
-	layout := "Mon Jan 02 15:04:05 2006"
-
 	counts := make(map[string]map[int64]int)
+	templates := make(map[int64]string)
 
-	file, err := os.Open("exemplo.log")
+	file, err := os.Open(logFile)
 	if err != nil {
 		fmt.Println("Erro ao abrir o arquivo:", err)
 		return
@@ -36,53 +45,79 @@ func main() {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-
+	timeRegex := regexp.MustCompile(timePattern)
 	ctx := context.Background()
+
+	// Processamento linha a linha
 	for scanner.Scan() {
-		log := scanner.Text()
-		timeMatch := timeRegex.FindStringSubmatch(log)
-		if len(timeMatch) < 2 {
+		logLine := scanner.Text()
+		timestamp, message, err := parseLogLine(logLine, timeRegex)
+		if err != nil {
+			continue // Ignora linhas inválidas
+		}
+
+		cluster, err := addToCluster(miner, ctx, message)
+		if err != nil {
+			fmt.Println("Erro ao processar log:", err)
 			continue
 		}
 
-		message := strings.TrimSpace(strings.ReplaceAll(log, timeMatch[0], ""))
-
-		_, cluster, _, _, _ := miner.AddLogMessage(ctx, message)
-
-		logTime, _ := time.Parse(layout, timeMatch[1])
-		hour := logTime.Format("2006-01-02 15")
-
-		if _, ok := counts[hour]; !ok {
-			counts[hour] = make(map[int64]int)
+		hourKey := timestamp.Format("2006-01-02 15")
+		if counts[hourKey] == nil {
+			counts[hourKey] = make(map[int64]int)
 		}
-
-		counts[hour][cluster.ClusterId]++
-
+		counts[hourKey][cluster.ClusterId]++
 	}
 
-	templates := make(map[int64]string)
+	// Mapeia todos os templates conhecidos
 	for _, cluster := range drain.GetClusters() {
 		templates[cluster.ClusterId] = cluster.GetTemplate()
 	}
 
-	keys := make([]string, 0, len(counts))
+	printHourlyCounts(counts, templates)
+	printTotalSummary(drain)
+}
 
-	for k := range counts {
-		keys = append(keys, k)
+// parseLogLine extrai o timestamp e a mensagem da linha do log
+func parseLogLine(line string, re *regexp.Regexp) (time.Time, string, error) {
+	matches := re.FindStringSubmatch(line)
+	if len(matches) < 2 {
+		return time.Time{}, "", fmt.Errorf("timestamp não encontrado")
 	}
+	timestamp, err := time.Parse(timeLayout, matches[1])
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	message := strings.TrimSpace(strings.ReplaceAll(line, matches[0], ""))
+	return timestamp, message, nil
+}
 
-	sort.Strings(keys)
+// addToCluster adiciona a mensagem ao minerador e retorna o cluster
+func addToCluster(miner *drain3.TemplateMiner, ctx context.Context, message string) (*drain3.LogCluster, error) {
+	_, cluster, _, _, err := miner.AddLogMessage(ctx, message)
+	return cluster, err
+}
 
-	for _, hour := range keys {
+// printHourlyCounts exibe os clusters agrupados por hora
+func printHourlyCounts(counts map[string]map[int64]int, templates map[int64]string) {
+	hours := make([]string, 0, len(counts))
+	for hour := range counts {
+		hours = append(hours, hour)
+	}
+	sort.Strings(hours)
+
+	for _, hour := range hours {
 		fmt.Printf("Hora: %s:00\n", hour)
 		for clusterID, count := range counts[hour] {
-			fmt.Printf("Cluster (%d) %s: %d\n", clusterID, templates[clusterID], count)
+			fmt.Printf("  Cluster (%d) %s: %d\n", clusterID, templates[clusterID], count)
 		}
 	}
+}
 
-	fmt.Println("----------------------- TOTAL ------------------------")
+// printTotalSummary exibe o total de ocorrências por cluster
+func printTotalSummary(drain *drain3.Drain) {
+	fmt.Println("\n----------------------- TOTAL ------------------------")
 	for _, cluster := range drain.GetClusters() {
-		templates[cluster.ClusterId] = cluster.GetTemplate()
 		fmt.Printf("Cluster (%d) %s: %d\n", cluster.ClusterId, cluster.GetTemplate(), cluster.Size)
 	}
 }
